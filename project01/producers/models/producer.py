@@ -7,8 +7,8 @@ from confluent_kafka.admin import AdminClient, NewTopic
 from confluent_kafka.avro import AvroProducer
 
 logger = logging.getLogger(__name__)
-broker_url = "PLAINTEXT://localhost:19092"
-schema_registry = "http://localhost:8081"
+broker_url = "PLAINTEXT://kafka:9092"
+schema_registry = "http://schema-registry:8081/"
 
 
 class Producer:
@@ -40,7 +40,7 @@ class Producer:
         #
         self.broker_properties = {
             "bootstrap.servers": broker_url,
-            "client.id": "producer",
+            "schema.registry.url": schema_registry
         }
 
         # If the topic does not already exist, try to create it
@@ -50,7 +50,8 @@ class Producer:
 
         # TODO: Configure the AvroProducer
         self.producer = AvroProducer({"bootstrap.servers": broker_url},
-                                     schema_registry=schema_registry)
+                                     default_key_schema=key_schema,
+                                     default_value_schema=value_schema)
 
     def create_topic(self):
         """Creates the producer topic if it does not already exist"""
