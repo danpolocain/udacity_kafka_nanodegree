@@ -54,16 +54,17 @@ class Producer:
                                      default_value_schema=value_schema)
 
     def create_topic(self):
+        client = AdminClient({"bootstrap.servers": self.broker_properties['bootstrap.servers']})
         """Creates the producer topic if it does not already exist"""
         #
         #
         # TODO: Write code that creates the topic for this producer if it does not already exist on
         # the Kafka Broker.
         try:
-            NewTopic(self.topic_name, self.num_partitions, self.num_replicas)
+            client.NewTopic(self.topic_name, self.num_partitions, self.num_replicas)
             logger.info(f"topic {self.topic_name} created!")
         except:
-            logger.info("topic creation kafka integration incomplete - skipping")
+            logger.info(f"topic creation kafka integration incomplete - skipping - error")
 
     def close(self):
         """Prepares the producer for exit by cleaning up the producer"""
@@ -75,7 +76,7 @@ class Producer:
             self.producer.flush()
             logger.info("producer closed")
         except:
-            logger.info("producer close incomplete - skipping")
+            logger.info("producer close incomplete - skipping - error")
 
     def time_millis(self):
         """Use this function to get the key for Kafka Events"""
