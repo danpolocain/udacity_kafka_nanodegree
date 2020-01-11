@@ -21,3 +21,9 @@ class Weather:
         # TODO: Process incoming weather messages. Set the temperature and status.
         #
         #
+        value = message.value()
+        self.temperature = value["temperature"]
+        self.status = value["status"]
+        logger.debug(
+            "Current weather: %sf - %s", self.temperature, self.status.replace("_", " ")
+        )
