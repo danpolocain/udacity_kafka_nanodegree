@@ -1,83 +1,193 @@
-"""Producer base-class providing common utilites and functionality"""
+"""Defines functionality relating to train lines"""
+import collections
+from enum import IntEnum
 import logging
-import time
 
-from confluent_kafka import avro
-from confluent_kafka.admin import AdminClient, NewTopic
-from confluent_kafka.avro import AvroProducer
+from station import Station
+from train import Train
+from turnstile import Turnstile
+
 
 logger = logging.getLogger(__name__)
-broker_url = "PLAINTEXT://kafka:9092"
-schema_registry = "http://schema-registry:8081/"
 
 
-class Producer:
-    """Defines and provides common functionality amongst Producers"""
+class Line:
+    """Contains Chicago Transit Authority (CTA) Elevated Loop Train ("L") Station Data"""
 
-    # Tracks existing topics across all Producer instances
-    existing_topics = set([])
+    colors = IntEnum("colors", "blue green red", start=0)
+    num_directions = 2
 
-    def __init__(
-            self,
-            topic_name,
-            key_schema,
-            value_schema=None,
-            num_partitions=1,
-            num_replicas=1,
-    ):
-        """Initializes a Producer object with basic settings"""
-        self.topic_name = topic_name
-        self.key_schema = key_schema
-        self.value_schema = value_schema
-        self.num_partitions = num_partitions
-        self.num_replicas = num_replicas
+    def __init__(self, color, station_data, num_trains=10):
+        self.color = color
+        self.num_trains = num_trains
+        self.stations = self._build_line_data(station_data)
+        # We must always discount the terminal station at the end of each direction
+        self.num_stations = len(self.stations) - 1
+        self.trains = self._build_trains()
 
-        #
-        #
-        # TODO: Configure the broker properties below. Make sure to reference the project README
-        # and use the Host URL for Kafka and Schema Registry!
-        #
-        #
-        self.broker_properties = {
-            "bootstrap.servers": broker_url,
-            "schema.registry.url": schema_registry
-        }
+    def _build_line_data(self, station_df):
+        """Constructs all stations on the line"""
+        stations = station_df["station_name"].unique()
 
-        # If the topic does not already exist, try to create it
-        if self.topic_name not in Producer.existing_topics:
-            self.create_topic()
-            Producer.existing_topics.add(self.topic_name)
+        station_data = station_df[station_df["station_name"] == stations[0]]
+        line = [
+            Station(station_data["station_id"].unique()[0], stations[0], self.color)
+        ]
+        prev_station = line[0]
+        for station in stations[1:]:
+            station_data = station_df[station_df["station_name"] == station]
+            new_station = Station(
+                station_data["station_id"].unique()[0],
+                station,
+                self.color,
+                prev_station,
+            )
+            prev_station.dir_b = new_station
+            prev_station = new_station
+            line.append(new_station)
+        return line
 
-        # TODO: Configure the AvroProducer
-        self.producer = AvroProducer({"bootstrap.servers": broker_url},
-                                     default_key_schema=key_schema,
-                                     default_value_schema=value_schema)
+    def _build_trains(self):
+        """Constructs and assigns train objects to stations"""
+        trains = []
+        curr_loc = 0
+        b_dir = True
+        for train_id in range(self.num_trains):
+            tid = str(train_id).zfill(3)
+            train = Train(
+                f"{self.color.name[0].upper()}L{tid}", Train.status.in_service
+            )
+            trains.append(train)
 
-    def create_topic(self):
-        client = AdminClient({"bootstrap.servers": self.broker_properties['bootstrap.servers']})
-        """Creates the producer topic if it does not already exist"""
-        #
-        #
-        # TODO: Write code that creates the topic for this producer if it does not already exist on
-        # the Kafka Broker.
-        try:
-            client.NewTopic(self.topic_name, self.num_partitions, self.num_replicas)
-            logger.info(f"topic {self.topic_name} created!")
-        except:
-            logger.info(f"topic creation kafka integration incomplete - skipping - error")
+            if b_dir:
+                self.stations[curr_loc].arrive_b(train, None, None)
+            else:
+                self.stations[curr_loc].arrive_a(train, None, None)
+            curr_loc, b_dir = self._get_next_idx(curr_loc, b_dir)
+
+        return trains
+
+    def run(self, timestamp, time_step):
+        """Advances trains between stations in the simulation. Runs turnstiles."""
+        self._advance_turnstiles(timestamp, time_step)
+        self._advance_trains()
 
     def close(self):
-        """Prepares the producer for exit by cleaning up the producer"""
-        #
-        #
-        # TODO: Write cleanup code for the Producer here
-        #
-        try:
-            self.producer.flush()
-            logger.info("producer closed")
-        except:
-            logger.info("producer close incomplete - skipping - error")
+        """Called to stop the simulation"""
+        _ = [station.close() for station in self.stations]
 
-    def time_millis(self):
-        """Use this function to get the key for Kafka Events"""
-        return int(round(time.time() * 1000))
+    def _advance_turnstiles(self, timestamp, time_step):
+        """Advances the turnstiles in the simulation"""
+        _ = [station.turnstile.run(timestamp, time_step) for station in self.stations]
+
+    def _advance_trains(self):
+        """Advances trains between stations in the simulation"""
+        # Find the first b train
+        curr_train, curr_index, b_direction = self._next_train()
+        self.stations[curr_index].b_train = None
+
+        trains_advanced = 0
+        while trains_advanced < self.num_trains - 1:
+            # The train departs the current station
+            if b_direction is True:
+                self.stations[curr_index].b_train = None
+            else:
+                self.stations[curr_index].a_train = None
+
+            prev_station = self.stations[curr_index].station_id
+            prev_dir = "b" if b_direction else "a"
+
+            # Advance this train to the next station
+            curr_index, b_direction = self._get_next_idx(
+                curr_index, b_direction, step_size=1
+            )
+            if b_direction is True:
+                self.stations[curr_index].arrive_b(curr_train, prev_station, prev_dir)
+            else:
+                self.stations[curr_index].arrive_a(curr_train, prev_station, prev_dir)
+
+            # Find the next train to advance
+            move = 1 if b_direction else -1
+            next_train, curr_index, b_direction = self._next_train(
+                curr_index + move, b_direction
+            )
+            if b_direction is True:
+                curr_train = self.stations[curr_index].b_train
+            else:
+                curr_train = self.stations[curr_index].a_train
+
+            curr_train = next_train
+            trains_advanced += 1
+
+        # The last train departs the current station
+        if b_direction is True:
+            self.stations[curr_index].b_train = None
+        else:
+            self.stations[curr_index].a_train = None
+
+        # Advance last train to the next station
+        prev_station = self.stations[curr_index].station_id
+        prev_dir = "b" if b_direction else "a"
+        curr_index, b_direction = self._get_next_idx(
+            curr_index, b_direction, step_size=1
+        )
+        if b_direction is True:
+            self.stations[curr_index].arrive_b(curr_train, prev_station, prev_dir)
+        else:
+            self.stations[curr_index].arrive_a(curr_train, prev_station, prev_dir)
+
+    def _next_train(self, start_index=0, b_direction=True, step_size=1):
+        """Given a starting index, finds the next train in either direction"""
+        if b_direction is True:
+            curr_index = self._next_train_b(start_index, step_size)
+
+            if curr_index == -1:
+                curr_index = self._next_train_a(len(self.stations) - 1, step_size)
+                b_direction = False
+        else:
+            curr_index = self._next_train_a(start_index, step_size)
+
+            if curr_index == -1:
+                curr_index = self._next_train_b(0, step_size)
+                b_direction = True
+
+        if b_direction is True:
+            return self.stations[curr_index].b_train, curr_index, True
+        return self.stations[curr_index].a_train, curr_index, False
+
+    def _next_train_b(self, start_index, step_size):
+        """Finds the next train in the b direction, if any"""
+        for i in range(start_index, len(self.stations), step_size):
+            if self.stations[i].b_train is not None:
+                return i
+        return -1
+
+    def _next_train_a(self, start_index, step_size):
+        """Finds the next train in the a direction, if any"""
+        for i in range(start_index, 0, -step_size):
+            if self.stations[i].a_train is not None:
+                return i
+        return -1
+
+    def _get_next_idx(self, curr_index, b_direction, step_size=None):
+        """Calculates the next station index. Returns next index and if it is b direction"""
+        if step_size is None:
+            step_size = int((self.num_stations * Line.num_directions) / self.num_trains)
+        if b_direction is True:
+            next_index = curr_index + step_size
+            if next_index < self.num_stations:
+                return next_index, True
+            else:
+                return self.num_stations - (next_index % self.num_stations), False
+        else:
+            next_index = curr_index - step_size
+            if next_index > 0:
+                return next_index, False
+            else:
+                return abs(next_index), True
+
+    def __str__(self):
+        return "\n".join(str(station) for station in self.stations)
+
+    def __repr__(self):
+        return str(self)
