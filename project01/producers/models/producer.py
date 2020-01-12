@@ -1,193 +1,85 @@
-"""Defines functionality relating to train lines"""
-import collections
-from enum import IntEnum
+"""Methods pertaining to loading and configuring CTA "L" station data."""
 import logging
+from pathlib import Path
 
-from station import Station
-from train import Train
-from turnstile import Turnstile
+from confluent_kafka import avro
 
 
 logger = logging.getLogger(__name__)
 
 
-class Line:
-    """Contains Chicago Transit Authority (CTA) Elevated Loop Train ("L") Station Data"""
+class Station(Producer):
+    """Defines a single station"""
 
-    colors = IntEnum("colors", "blue green red", start=0)
-    num_directions = 2
+    key_schema = avro.load(f"{Path(__file__).parents[0]}/schemas/arrival_key.json")
+    value_schema = avro.load(f"{Path(__file__).parents[0]}/schemas/arrival_value.json")
 
-    def __init__(self, color, station_data, num_trains=10):
-        self.color = color
-        self.num_trains = num_trains
-        self.stations = self._build_line_data(station_data)
-        # We must always discount the terminal station at the end of each direction
-        self.num_stations = len(self.stations) - 1
-        self.trains = self._build_trains()
+    def __init__(self, station_id, name, color, direction_a=None, direction_b=None):
+        self.name = name
 
-    def _build_line_data(self, station_df):
-        """Constructs all stations on the line"""
-        stations = station_df["station_name"].unique()
-
-        station_data = station_df[station_df["station_name"] == stations[0]]
-        line = [
-            Station(station_data["station_id"].unique()[0], stations[0], self.color)
-        ]
-        prev_station = line[0]
-        for station in stations[1:]:
-            station_data = station_df[station_df["station_name"] == station]
-            new_station = Station(
-                station_data["station_id"].unique()[0],
-                station,
-                self.color,
-                prev_station,
-            )
-            prev_station.dir_b = new_station
-            prev_station = new_station
-            line.append(new_station)
-        return line
-
-    def _build_trains(self):
-        """Constructs and assigns train objects to stations"""
-        trains = []
-        curr_loc = 0
-        b_dir = True
-        for train_id in range(self.num_trains):
-            tid = str(train_id).zfill(3)
-            train = Train(
-                f"{self.color.name[0].upper()}L{tid}", Train.status.in_service
-            )
-            trains.append(train)
-
-            if b_dir:
-                self.stations[curr_loc].arrive_b(train, None, None)
-            else:
-                self.stations[curr_loc].arrive_a(train, None, None)
-            curr_loc, b_dir = self._get_next_idx(curr_loc, b_dir)
-
-        return trains
-
-    def run(self, timestamp, time_step):
-        """Advances trains between stations in the simulation. Runs turnstiles."""
-        self._advance_turnstiles(timestamp, time_step)
-        self._advance_trains()
-
-    def close(self):
-        """Called to stop the simulation"""
-        _ = [station.close() for station in self.stations]
-
-    def _advance_turnstiles(self, timestamp, time_step):
-        """Advances the turnstiles in the simulation"""
-        _ = [station.turnstile.run(timestamp, time_step) for station in self.stations]
-
-    def _advance_trains(self):
-        """Advances trains between stations in the simulation"""
-        # Find the first b train
-        curr_train, curr_index, b_direction = self._next_train()
-        self.stations[curr_index].b_train = None
-
-        trains_advanced = 0
-        while trains_advanced < self.num_trains - 1:
-            # The train departs the current station
-            if b_direction is True:
-                self.stations[curr_index].b_train = None
-            else:
-                self.stations[curr_index].a_train = None
-
-            prev_station = self.stations[curr_index].station_id
-            prev_dir = "b" if b_direction else "a"
-
-            # Advance this train to the next station
-            curr_index, b_direction = self._get_next_idx(
-                curr_index, b_direction, step_size=1
-            )
-            if b_direction is True:
-                self.stations[curr_index].arrive_b(curr_train, prev_station, prev_dir)
-            else:
-                self.stations[curr_index].arrive_a(curr_train, prev_station, prev_dir)
-
-            # Find the next train to advance
-            move = 1 if b_direction else -1
-            next_train, curr_index, b_direction = self._next_train(
-                curr_index + move, b_direction
-            )
-            if b_direction is True:
-                curr_train = self.stations[curr_index].b_train
-            else:
-                curr_train = self.stations[curr_index].a_train
-
-            curr_train = next_train
-            trains_advanced += 1
-
-        # The last train departs the current station
-        if b_direction is True:
-            self.stations[curr_index].b_train = None
-        else:
-            self.stations[curr_index].a_train = None
-
-        # Advance last train to the next station
-        prev_station = self.stations[curr_index].station_id
-        prev_dir = "b" if b_direction else "a"
-        curr_index, b_direction = self._get_next_idx(
-            curr_index, b_direction, step_size=1
+        # TODO: Complete the below by deciding on a topic name, number of partitions, and number of
+        # replicas
+        super().__init__(
+            topic_name="org.chicago.cta.station.arrivals.v1",
+            key_schema=Station.key_schema,
+            value_schema=Station.value_schema,
+            num_partitions=5,
+            num_replicas=1,
         )
-        if b_direction is True:
-            self.stations[curr_index].arrive_b(curr_train, prev_station, prev_dir)
-        else:
-            self.stations[curr_index].arrive_a(curr_train, prev_station, prev_dir)
 
-    def _next_train(self, start_index=0, b_direction=True, step_size=1):
-        """Given a starting index, finds the next train in either direction"""
-        if b_direction is True:
-            curr_index = self._next_train_b(start_index, step_size)
+        self.station_id = int(station_id)
+        self.color = color
+        self.dir_a = direction_a
+        self.dir_b = direction_b
+        self.a_train = None
+        self.b_train = None
+        self.turnstile = Turnstile(self)
 
-            if curr_index == -1:
-                curr_index = self._next_train_a(len(self.stations) - 1, step_size)
-                b_direction = False
-        else:
-            curr_index = self._next_train_a(start_index, step_size)
-
-            if curr_index == -1:
-                curr_index = self._next_train_b(0, step_size)
-                b_direction = True
-
-        if b_direction is True:
-            return self.stations[curr_index].b_train, curr_index, True
-        return self.stations[curr_index].a_train, curr_index, False
-
-    def _next_train_b(self, start_index, step_size):
-        """Finds the next train in the b direction, if any"""
-        for i in range(start_index, len(self.stations), step_size):
-            if self.stations[i].b_train is not None:
-                return i
-        return -1
-
-    def _next_train_a(self, start_index, step_size):
-        """Finds the next train in the a direction, if any"""
-        for i in range(start_index, 0, -step_size):
-            if self.stations[i].a_train is not None:
-                return i
-        return -1
-
-    def _get_next_idx(self, curr_index, b_direction, step_size=None):
-        """Calculates the next station index. Returns next index and if it is b direction"""
-        if step_size is None:
-            step_size = int((self.num_stations * Line.num_directions) / self.num_trains)
-        if b_direction is True:
-            next_index = curr_index + step_size
-            if next_index < self.num_stations:
-                return next_index, True
-            else:
-                return self.num_stations - (next_index % self.num_stations), False
-        else:
-            next_index = curr_index - step_size
-            if next_index > 0:
-                return next_index, False
-            else:
-                return abs(next_index), True
+    def run(self, train, direction, prev_station_id, prev_direction):
+        """Simulates train arrivals at this station"""
+        # TODO: Complete this function by producing an arrival message to Kafka
+        try:
+            self.producer.produce(
+                topic=self.topic_name,
+                key={"timestamp": self.time_millis()},
+                value={
+                    "station_id": self.station_id,
+                    "train_id": train.train_id,
+                    "direction": direction,
+                    "line": self.color.name,
+                    "train_status": train.status.name,
+                    "prev_station_id": prev_station_id,
+                    "prev_direction": prev_direction,
+                },
+            )
+        except Exception as e:
+            logger.fatal(e)
+            raise e
 
     def __str__(self):
-        return "\n".join(str(station) for station in self.stations)
+        return "Station | {:^5} | {:<30} | Direction A: | {:^5} | departing to {:<30} | Direction B: | {:^5} | departing to {:<30} | ".format(
+            self.station_id,
+            self.name,
+            self.a_train.train_id if self.a_train is not None else "---",
+            self.dir_a.name if self.dir_a is not None else "---",
+            self.b_train.train_id if self.b_train is not None else "---",
+            self.dir_b.name if self.dir_b is not None else "---",
+        )
 
     def __repr__(self):
         return str(self)
+
+    def arrive_a(self, train, prev_station_id, prev_direction):
+        """Denotes a train arrival at this station in the 'a' direction"""
+        self.a_train = train
+        self.run(train, "a", prev_station_id, prev_direction)
+
+    def arrive_b(self, train, prev_station_id, prev_direction):
+        """Denotes a train arrival at this station in the 'b' direction"""
+        self.b_train = train
+        self.run(train, "b", prev_station_id, prev_direction)
+
+    def close(self):
+        """Prepares the producer for exit by cleaning up the producer"""
+        self.turnstile.close()
+        super(Station, self).close()
