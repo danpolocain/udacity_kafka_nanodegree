@@ -4,8 +4,8 @@ from pathlib import Path
 
 from confluent_kafka import avro
 
-from models.turnstile import Turnstile
-from producer import Producer
+from models import Turnstile
+from models.producer import Producer
 
 
 logger = logging.getLogger(__name__)
@@ -56,15 +56,19 @@ class Station(Producer):
                     "station_id": self.station_id,
                     "train_id": train.train_id,
                     "direction": direction,
-                    "line": self.color.name,
+                    "line": self.color._name_,
                     "train_status": train.status.name,
                     "prev_station_id": prev_station_id,
                     "prev_direction": prev_direction
-                }
+                },
+                value_schema=self.value_schema
             )
-        except Exception as e:
-            logger.fatal(e)
-            raise e
+        except  Exception as e:
+            logger.warning(f"Encountered Error - {e} for station_id : {self.station_id} train_id : {train.train_id} direction : {direction} line : {self.color._name_}")
+            #raise e
+        #except Exception as e:
+        #    logger.fatal(e)
+        #    raise e
 
     def __str__(self):
         return "Station | {:^5} | {:<30} | Direction A: | {:^5} | departing to {:<30} | Direction B: | {:^5} | departing to {:<30} | ".format(

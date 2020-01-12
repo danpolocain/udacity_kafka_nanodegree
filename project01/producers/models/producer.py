@@ -1,85 +1,93 @@
-"""Methods pertaining to loading and configuring CTA "L" station data."""
+"""Producer base-class providing common utilites and functionality"""
 import logging
-from pathlib import Path
+import time
+
 
 from confluent_kafka import avro
-
+from confluent_kafka.admin import AdminClient, NewTopic
+from confluent_kafka.avro import AvroProducer
 
 logger = logging.getLogger(__name__)
 
 
-class Station(Producer):
-    """Defines a single station"""
+class Producer:
+    """Defines and provides common functionality amongst Producers"""
 
-    key_schema = avro.load(f"{Path(__file__).parents[0]}/schemas/arrival_key.json")
-    value_schema = avro.load(f"{Path(__file__).parents[0]}/schemas/arrival_value.json")
+    # Tracks existing topics across all Producer instances
+    existing_topics = set([])
 
-    def __init__(self, station_id, name, color, direction_a=None, direction_b=None):
-        self.name = name
+    def __init__(
+        self, topic_name, key_schema, value_schema, num_partitions=1, num_replicas=1
+    ):
+        """Initializes a Producer object with basic settings"""
+        self.topic_name = topic_name
+        self.key_schema = key_schema
+        self.value_schema = value_schema
+        self.num_partitions = num_partitions
+        self.num_replicas = num_replicas
 
-        # TODO: Complete the below by deciding on a topic name, number of partitions, and number of
-        # replicas
-        super().__init__(
-            topic_name="org.chicago.cta.station.arrivals.v1",
-            key_schema=Station.key_schema,
-            value_schema=Station.value_schema,
-            num_partitions=5,
-            num_replicas=1,
+        # TODO: Configure the broker properties below. Make sure to reference the project README
+        # and use the Host URL for Kafka and Schema Registry!
+        self.broker_properties = {
+            "bootstrap.servers": "localhost:9092",
+            "schema.registry.url": "http://localhost:8081",
+        }
+
+        # If the topic does not already exist, try to create it
+        if self.topic_name not in Producer.existing_topics:
+            self.create_topic()
+            Producer.existing_topics.add(self.topic_name)
+
+        # TODO: Configure the AvroProducer
+        self.producer = AvroProducer(
+            self.broker_properties,
+            default_key_schema=key_schema,
+            default_value_schema=value_schema,
         )
 
-        self.station_id = int(station_id)
-        self.color = color
-        self.dir_a = direction_a
-        self.dir_b = direction_b
-        self.a_train = None
-        self.b_train = None
-        self.turnstile = Turnstile(self)
-
-    def run(self, train, direction, prev_station_id, prev_direction):
-        """Simulates train arrivals at this station"""
-        # TODO: Complete this function by producing an arrival message to Kafka
-        try:
-            self.producer.produce(
-                topic=self.topic_name,
-                key={"timestamp": self.time_millis()},
-                value={
-                    "station_id": self.station_id,
-                    "train_id": train.train_id,
-                    "direction": direction,
-                    "line": self.color.name,
-                    "train_status": train.status.name,
-                    "prev_station_id": prev_station_id,
-                    "prev_direction": prev_direction,
-                },
-            )
-        except Exception as e:
-            logger.fatal(e)
-            raise e
-
-    def __str__(self):
-        return "Station | {:^5} | {:<30} | Direction A: | {:^5} | departing to {:<30} | Direction B: | {:^5} | departing to {:<30} | ".format(
-            self.station_id,
-            self.name,
-            self.a_train.train_id if self.a_train is not None else "---",
-            self.dir_a.name if self.dir_a is not None else "---",
-            self.b_train.train_id if self.b_train is not None else "---",
-            self.dir_b.name if self.dir_b is not None else "---",
+    def create_topic(self):
+        """Creates the producer topic if it does not already exist"""
+        # TODO: Write code that creates the topic for this producer if it does not already exist on
+        # the Kafka Broker.
+        logger.info("beginning topic creation for %s", self.topic_name)
+        client = AdminClient(
+            {"bootstrap.servers": "localhost:9092"}
+        )
+        topic_metadata = client.list_topics(timeout=5)
+        if self.topic_name in set(
+            t.topic for t in iter(topic_metadata.topics.values())
+        ):
+            logger.info("not recreating existing topic %s", self.topic_name)
+            return
+        logger.info(
+            "creating topic %s with partition %s replicas %s",
+            self.topic_name,
+            self.num_partitions,
+            self.num_replicas,
+        )
+        futures = client.create_topics(
+            [
+                NewTopic(
+                    topic=self.topic_name,
+                    num_partitions=self.num_partitions,
+                    replication_factor=self.num_replicas,
+                )
+            ]
         )
 
-    def __repr__(self):
-        return str(self)
+        for topic, future in futures.items():
+            try:
+                future.result()
+                logger.info("topic created")
+            except Exception as e:
+                logger.fatal("failed to create topic %s: %s", topic, e)
 
-    def arrive_a(self, train, prev_station_id, prev_direction):
-        """Denotes a train arrival at this station in the 'a' direction"""
-        self.a_train = train
-        self.run(train, "a", prev_station_id, prev_direction)
-
-    def arrive_b(self, train, prev_station_id, prev_direction):
-        """Denotes a train arrival at this station in the 'b' direction"""
-        self.b_train = train
-        self.run(train, "b", prev_station_id, prev_direction)
+    def time_millis(self):
+        return int(round(time.time() * 1000))
 
     def close(self):
         """Prepares the producer for exit by cleaning up the producer"""
-        self.turnstile.close()
-        super(Station, self).close()
+        # TODO: Write cleanup code for the Producer here
+        if self.producer is not None:
+            logger.debug("flushing producer...")
+            self.producer.flush()

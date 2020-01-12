@@ -26,7 +26,7 @@ services:
     environment:
       KAFKA_BROKER_ID: 0
       KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
-      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka0:19092,EXTERNAL://${DOCKER_HOST_IP:-127.0.0.1}:29092"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka0:19092,EXTERNAL://${DOCKER_HOST_IP:-127.0.0.1}:9092"
       KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
@@ -59,7 +59,7 @@ services:
     - "schema-registry"
 
   connect:
-    image: confluentinc/cp-kafka-connect:5.2.2
+    image: confluentinc/cp-kafka-connect:5.3.2
     ports:
     - "8083:8083"
     environment:
@@ -140,28 +140,3 @@ services:
     volumes:
     - ./producers/data/cta_stations.csv:/tmp/cta_stations.csv
     - ./load_stations.sql:/docker-entrypoint-initdb.d/load_stations.sql
-
-  control-center:
-    image: confluentinc/cp-enterprise-control-center:5.3.1
-    hostname: control-center
-    container_name: control-center
-    depends_on:
-      - zookeeper
-      - kafka0
-      - schema-registry
-      - connect
-      - ksql
-    ports:
-      - "9021:9021"
-    environment:
-      CONTROL_CENTER_BOOTSTRAP_SERVERS: 'kafka0:19092'
-      CONTROL_CENTER_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      CONTROL_CENTER_CONNECT_CLUSTER: 'connect:8083'
-      CONTROL_CENTER_KSQL_URL: 'ksql:8088'
-      CONTROL_CENTER_KSQL_ADVERTISED_URL: 'http://ksql:8088/'
-      CONTROL_CENTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081/'
-      CONTROL_CENTER_REPLICATION_FACTOR: 1
-      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
-      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
-      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
-      PORT: 9021
